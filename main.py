@@ -2,23 +2,25 @@ import os
 import random
 import logging
 import traceback
-import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from label_studio_sdk import LabelStudio
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("webhook")
 
 app = FastAPI()
 
-LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL", "https://label-studio-r4q9.onrender.com")
-API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
-PHASE_2_PROJECT_ID = os.getenv("PHASE_2_PROJECT_ID")
+# Environment Variables
+LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL", "https://label-studio-r4q9.onrender.com").rstrip("/")
+API_KEY = os.getenv("LABEL_STUDIO_API_KEY", "").strip()
+PHASE_2_PROJECT_ID = int(os.getenv("PHASE_2_PROJECT_ID", "2"))
 
-HEADERS = {
-    "Authorization": f"Bearer {API_KEY}",
-    "Content-Type": "application/json"
-}
+# Initialize official LabelStudio Client
+ls_client = LabelStudio(
+    base_url=LABEL_STUDIO_URL,
+    api_key=API_KEY
+)
 
 def extract_score(result_list, target_name):
     """Safely extracts numerical ratings matching choice strings (e.g. '5 - Excellent' -> 5)."""
@@ -52,13 +54,9 @@ def extract_overall_winner(result_list):
 def health_check():
     return {"status": "Webhook online"}
 
-# GET handler so opening the URL in a browser returns JSON instead of 405 Method Not Allowed
 @app.get("/webhook/phase1-complete")
 def webhook_get_check():
-    return {
-        "status": "Webhook endpoint is active",
-        "message": "This endpoint receives HTTP POST requests from Label Studio."
-    }
+    return {"status": "Webhook endpoint is active (POST required)"}
 
 @app.post("/webhook/phase1-complete")
 async def handle_phase1_completion(request: Request):
@@ -74,7 +72,7 @@ async def handle_phase1_completion(request: Request):
         task = payload.get("task", {})
         task_data = task.get("data", {}) if isinstance(task, dict) else {}
 
-        # Handle Webhook Payload Structure
+        # Safely extract annotation result list
         annotation = payload.get("annotation", {})
         if isinstance(annotation, dict) and "result" in annotation:
             results = annotation.get("result", [])
@@ -83,7 +81,7 @@ async def handle_phase1_completion(request: Request):
         else:
             results = []
 
-        # Extract metrics
+        # Extract quality scores
         score_a_quality = extract_score(results, "a_q5")
         score_b_quality = extract_score(results, "b_q5")
 
@@ -125,27 +123,27 @@ async def handle_phase1_completion(request: Request):
             winner_label = f"Tie (Selected Summary {choice})"
             winning_text = summary_a if choice == "A" else summary_b
 
-        # Payload structure for Phase 2 import API
-        phase2_payload = {
-            "data": {
-                "packet_id": task_data.get("packet_id", ""),
-                "title": task_data.get("title", ""),
-                "intro_text": task_data.get("intro_text", ""),
-                "winning_summary_text": winning_text,
-                "winner_label": winner_label,
-                "summary_a_metrics": metrics_a,
-                "summary_b_metrics": metrics_b,
-            }
+        phase2_data = {
+            "packet_id": task_data.get("packet_id", ""),
+            "title": task_data.get("title", ""),
+            "intro_text": task_data.get("intro_text", ""),
+            "winning_summary_text": winning_text,
+            "winner_label": winner_label,
+            "summary_a_metrics": metrics_a,
+            "summary_b_metrics": metrics_b,
         }
 
-        target_url = f"{LABEL_STUDIO_URL.rstrip('/')}/api/projects/{PHASE_2_PROJECT_ID}/tasks"
-        res = requests.post(target_url, headers=HEADERS, json=phase2_payload)
+        # Create task in Phase 2 using official SDK method
+        created_task = ls_client.tasks.create(
+            project=PHASE_2_PROJECT_ID,
+            data=phase2_data
+        )
 
-        logger.info(f"Phase 2 Task Creation Status: {res.status_code}")
+        logger.info(f"Successfully created Phase 2 Task ID: {created_task.id}")
 
         return JSONResponse(status_code=200, content={
             "status": "success",
-            "ls_status": res.status_code,
+            "task_id": created_task.id,
             "winner_label": winner_label
         })
 
