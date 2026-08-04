@@ -3,7 +3,6 @@ import logging
 import requests
 from fastapi import FastAPI, Request
 
-# Configure logging to display execution output directly in Render
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("webhook")
 
@@ -25,38 +24,43 @@ def health_check():
 @app.post("/webhook/phase1-complete")
 async def handle_phase1_completion(request: Request):
     try:
+        # Read raw body safely first
+        raw_body = await request.body()
+        logger.info(f"Raw incoming payload received: {len(raw_body)} bytes")
+
         payload = await request.json()
-        
-        action = payload.get("action")
-        logger.info(f"--- WEBHOOK TRIGGERED: Action = {action} ---")
+        action = payload.get("action", "UNKNOWN")
+        logger.info(f"--- WEBHOOK ACTION: {action} ---")
 
         if action not in ["ANNOTATION_CREATED", "ANNOTATION_UPDATED"]:
-            logger.info(f"Ignoring action: {action}")
-            return {"status": "ignored", "reason": f"Action {action} ignored"}
+            return {"status": "ignored", "reason": f"Action '{action}' ignored"}
 
-        task_data = payload.get("task", {}).get("data", {})
-        annotation_results = payload.get("annotation", {}).get("result", [])
+        task = payload.get("task", {})
+        task_data = task.get("data", {})
+        annotation = payload.get("annotation", {})
+        annotation_results = annotation.get("result", [])
 
-        logger.info(f"Task Data Keys: {list(task_data.keys())}")
-        logger.info(f"Annotation Results Count: {len(annotation_results)}")
+        logger.info(f"Task ID: {task.get('id')}, Data Keys: {list(task_data.keys())}")
 
-        # Extract numerical scores safely
+        # Parse evaluation scores
         scores = {}
         for item in annotation_results:
             from_name = item.get("from_name")
             value = item.get("value", {})
             choices = value.get("choices", [])
-            if choices:
-                choice_val = str(choices[0])
-                first_char = choice_val.split("-")[0].strip()
-                score_num = int(first_char) if first_char.isdigit() else 0
-                scores[from_name] = score_num
+            if choices and from_name:
+                choice_str = str(choices[0]).strip()
+                # Extract leading digit if available
+                first_char = choice_str.split("-")[0].strip()
+                scores[from_name] = int(first_char) if first_char.isdigit() else 0
 
-        logger.info(f"Extracted Scores: {scores}")
+        logger.info(f"Parsed Scores Dictionary: {scores}")
 
+        # Calculate scores (sum penalty)
         score_a = scores.get("accuracy_a", 1) + scores.get("hallucination_a", 1)
         score_b = scores.get("accuracy_b", 1) + scores.get("hallucination_b", 1)
 
+        # Retrieve text with multiple fallback keys
         summary_a = task_data.get("summary_a_text") or task_data.get("summary_a") or ""
         summary_b = task_data.get("summary_b_text") or task_data.get("summary_b") or ""
 
@@ -67,6 +71,9 @@ async def handle_phase1_completion(request: Request):
             chosen_summary = summary_b
             chosen_label = "B"
 
+        logger.info(f"Selected Winner: Summary {chosen_label}")
+
+        # Build payload for Phase 2 task creation
         phase2_payload = {
             "data": {
                 "packet_id": task_data.get("packet_id"),
@@ -82,15 +89,18 @@ async def handle_phase1_completion(request: Request):
 
         res = requests.post(target_url, headers=HEADERS, json=phase2_payload)
 
-        logger.info(f"Label Studio Response Status: {res.status_code}")
-        logger.info(f"Label Studio Response Body: {res.text}")
+        logger.info(f"Label Studio API Response Code: {res.status_code}")
+        logger.info(f"Label Studio API Response Body: {res.text}")
 
         return {
-            "status": "processed", 
-            "ls_status": res.status_code, 
+            "status": "success",
+            "ls_status": res.status_code,
             "ls_response": res.text
         }
 
     except Exception as e:
-        logger.error(f"Error processing webhook: {str(e)}", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        logger.error(f"EXCEPTION HANDLED: {str(e)}", exc_info=True)
+        return {
+            "status": "error",
+            "error_details": str(e)
+        }
