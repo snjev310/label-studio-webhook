@@ -1,6 +1,7 @@
 import os
 import random
 import logging
+import traceback
 import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -51,6 +52,14 @@ def extract_overall_winner(result_list):
 def health_check():
     return {"status": "Webhook online"}
 
+# GET handler so opening the URL in a browser returns JSON instead of 405 Method Not Allowed
+@app.get("/webhook/phase1-complete")
+def webhook_get_check():
+    return {
+        "status": "Webhook endpoint is active",
+        "message": "This endpoint receives HTTP POST requests from Label Studio."
+    }
+
 @app.post("/webhook/phase1-complete")
 async def handle_phase1_completion(request: Request):
     try:
@@ -65,7 +74,7 @@ async def handle_phase1_completion(request: Request):
         task = payload.get("task", {})
         task_data = task.get("data", {}) if isinstance(task, dict) else {}
 
-        # Handle Webhook Payload Structure (Single Annotation)
+        # Handle Webhook Payload Structure
         annotation = payload.get("annotation", {})
         if isinstance(annotation, dict) and "result" in annotation:
             results = annotation.get("result", [])
@@ -141,5 +150,5 @@ async def handle_phase1_completion(request: Request):
         })
 
     except Exception as e:
-        logger.error(f"Webhook processing error: {e}")
+        logger.error(f"Webhook processing error: {e}\n{traceback.format_exc()}")
         return JSONResponse(status_code=200, content={"status": "error", "message": str(e)})
