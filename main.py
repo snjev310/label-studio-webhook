@@ -3,7 +3,7 @@ import logging
 import requests
 from fastapi import FastAPI, Request
 
-# Configure logging to see output directly in Render logs
+# Configure logging to display execution output directly in Render
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("webhook")
 
@@ -27,23 +27,20 @@ async def handle_phase1_completion(request: Request):
     try:
         payload = await request.json()
         
-        # Log the action
         action = payload.get("action")
         logger.info(f"--- WEBHOOK TRIGGERED: Action = {action} ---")
 
-        # Ignore non-annotation events
         if action not in ["ANNOTATION_CREATED", "ANNOTATION_UPDATED"]:
             logger.info(f"Ignoring action: {action}")
             return {"status": "ignored", "reason": f"Action {action} ignored"}
 
-        # Extract task and annotation
         task_data = payload.get("task", {}).get("data", {})
         annotation_results = payload.get("annotation", {}).get("result", [])
 
         logger.info(f"Task Data Keys: {list(task_data.keys())}")
         logger.info(f"Annotation Results Count: {len(annotation_results)}")
 
-        # Safely extract scores
+        # Extract numerical scores safely
         scores = {}
         for item in annotation_results:
             from_name = item.get("from_name")
@@ -51,18 +48,15 @@ async def handle_phase1_completion(request: Request):
             choices = value.get("choices", [])
             if choices:
                 choice_val = str(choices[0])
-                # Safely attempt to convert leading character to integer
                 first_char = choice_val.split("-")[0].strip()
                 score_num = int(first_char) if first_char.isdigit() else 0
                 scores[from_name] = score_num
 
         logger.info(f"Extracted Scores: {scores}")
 
-        # Compute total scores (Default to 1 if key missing)
         score_a = scores.get("accuracy_a", 1) + scores.get("hallucination_a", 1)
         score_b = scores.get("accuracy_b", 1) + scores.get("hallucination_b", 1)
 
-        # Retrieve text with fallbacks
         summary_a = task_data.get("summary_a_text") or task_data.get("summary_a") or ""
         summary_b = task_data.get("summary_b_text") or task_data.get("summary_b") or ""
 
@@ -73,7 +67,6 @@ async def handle_phase1_completion(request: Request):
             chosen_summary = summary_b
             chosen_label = "B"
 
-        # Build payload for Phase 2
         phase2_payload = {
             "data": {
                 "packet_id": task_data.get("packet_id"),
@@ -84,7 +77,6 @@ async def handle_phase1_completion(request: Request):
             }
         }
 
-        # Make request to Label Studio Phase 2
         target_url = f"{LABEL_STUDIO_URL.rstrip('/')}/api/projects/{PHASE_2_PROJECT_ID}/tasks"
         logger.info(f"Posting winning task to: {target_url}")
 
