@@ -2,7 +2,7 @@ import os
 import random
 import logging
 import requests
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("webhook")
@@ -19,9 +19,11 @@ HEADERS = {
 }
 
 def extract_score(result_list, target_name):
-    """Extracts numerical rating from question responses (e.g., '5 - Excellent' -> 5)."""
+    """Extracts numerical rating from question responses (e.g. '5 - Excellent' -> 5)."""
+    if not isinstance(result_list, list):
+        return 0
     for res in result_list:
-        if res.get("from_name") == target_name:
+        if isinstance(res, dict) and res.get("from_name") == target_name:
             choices = res.get("value", {}).get("choices", [])
             if choices and choices[0] and str(choices[0])[0].isdigit():
                 return int(str(choices[0])[0])
@@ -35,21 +37,33 @@ def health_check():
 async def handle_phase1_completion(request: Request):
     try:
         payload = await request.json()
-        action = payload.get("action", "")
+    except Exception as parse_err:
+        return {"status": "error", "message": f"Invalid JSON payload: {parse_err}"}
 
-        logger.info(f"--- WEBHOOK ACTION: {action} ---")
+    action = payload.get("action", "")
 
-        if action not in ["ANNOTATION_CREATED", "ANNOTATION_UPDATED"]:
-            return {"status": "ignored", "reason": f"Action {action} ignored"}
+    # Only process annotation actions
+    if action not in ["ANNOTATION_CREATED", "ANNOTATION_UPDATED"]:
+        return {"status": "ignored", "reason": f"Action '{action}' ignored"}
 
-        task_data = payload.get("task", {}).get("data", {})
-        annotation_results = payload.get("annotation", {}).get("result", [])
+    try:
+        task = payload.get("task", {})
+        task_data = task.get("data", {}) if isinstance(task, dict) else {}
+
+        # Safely extract annotation result list regardless of webhook payload structure
+        annotation = payload.get("annotation", {})
+        if isinstance(annotation, dict) and "result" in annotation:
+            annotation_results = annotation.get("result", [])
+        elif "annotations" in payload and isinstance(payload["annotations"], list) and payload["annotations"]:
+            annotation_results = payload["annotations"][0].get("result", [])
+        else:
+            annotation_results = []
 
         # Extract overall quality scores (Q5)
         score_a_quality = extract_score(annotation_results, "a_q5")
         score_b_quality = extract_score(annotation_results, "b_q5")
 
-        # Extract metric breakdowns matching your exact schema
+        # Extract metric breakdowns matching export script schema
         metrics_a = {
             "accuracy": extract_score(annotation_results, "a_q1"),
             "hallucinations": extract_score(annotation_results, "a_q2"),
@@ -66,7 +80,7 @@ async def handle_phase1_completion(request: Request):
             "quality": score_b_quality,
         }
 
-        # Winner selection logic matching your export script
+        # Winner selection logic
         if score_a_quality > score_b_quality:
             winner_label = "Summary A"
             winning_text = task_data.get("summary_a_text", "")
@@ -78,7 +92,7 @@ async def handle_phase1_completion(request: Request):
             winner_label = f"Tie (Selected Summary {choice})"
             winning_text = task_data.get("summary_a_text", "") if choice == "A" else task_data.get("summary_b_text", "")
 
-        # Format output payload for Phase 2 task creation
+        # Format payload for Phase 2 task creation
         phase2_payload = {
             "data": {
                 "packet_id": task_data.get("packet_id", ""),
@@ -92,19 +106,18 @@ async def handle_phase1_completion(request: Request):
         }
 
         target_url = f"{LABEL_STUDIO_URL.rstrip('/')}/api/projects/{PHASE_2_PROJECT_ID}/tasks"
-        logger.info(f"Posting task to Phase 2 ({target_url})...")
-
         res = requests.post(target_url, headers=HEADERS, json=phase2_payload)
-
-        logger.info(f"Phase 2 API Response Status: {res.status_code}")
-        logger.info(f"Phase 2 API Response Text: {res.text}")
 
         return {
             "status": "success",
-            "ls_status": res.status_code,
-            "ls_response": res.text
+            "ls_status_code": res.status_code,
+            "ls_response": res.text,
+            "winner": winner_label
         }
 
     except Exception as e:
-        logger.error(f"Error handling webhook: {e}", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        # Prevent 500 error and return exception details cleanly
+        return {
+            "status": "error",
+            "exception": str(e)
+        }
