@@ -16,7 +16,7 @@ API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
 PHASE_2_PROJECT_ID = os.getenv("PHASE_2_PROJECT_ID")
 
 HEADERS = {
-    "Authorization": f"Token {API_KEY}",
+    "Authorization": f"Bearer {API_KEY}",
     "Content-Type": "application/json"
 }
 
