@@ -20,33 +20,31 @@ HEADERS = {
 }
 
 def extract_score(result_list, target_name):
-    """Extracts numerical rating from question choices safely."""
+    """Safely extracts numerical ratings matching choice strings (e.g. '5 - Excellent' -> 5)."""
     if not isinstance(result_list, list):
         return 0
     for res in result_list:
         if isinstance(res, dict) and res.get("from_name") == target_name:
             choices = res.get("value", {}).get("choices", [])
-            if choices and len(choices) > 0 and choices[0]:
+            if choices and choices[0]:
                 val_str = str(choices[0]).strip()
                 if val_str and val_str[0].isdigit():
                     return int(val_str[0])
     return 0
 
 def extract_overall_winner(result_list):
-    """Extracts explicit human choice from overall_winner if present."""
+    """Extracts explicit human selection from 'overall_winner' if recorded."""
     if not isinstance(result_list, list):
         return None
     for res in result_list:
         if isinstance(res, dict) and res.get("from_name") == "overall_winner":
             choices = res.get("value", {}).get("choices", [])
-            if choices and len(choices) > 0 and choices[0]:
-                val = str(choices[0])
-                if "Summary A" in val:
+            if choices and choices[0]:
+                val_str = str(choices[0])
+                if "Summary A" in val_str:
                     return "Summary A"
-                elif "Summary B" in val:
+                elif "Summary B" in val_str:
                     return "Summary B"
-                elif "Tie" in val:
-                    return "Tie"
     return None
 
 @app.get("/")
@@ -56,52 +54,48 @@ def health_check():
 @app.post("/webhook/phase1-complete")
 async def handle_phase1_completion(request: Request):
     try:
-        # Read raw json body safely
-        try:
-            payload = await request.json()
-        except Exception as json_err:
-            return JSONResponse(status_code=200, content={"status": "ignored", "reason": f"Invalid JSON body: {str(json_err)}"})
-
+        payload = await request.json()
         action = payload.get("action", "")
+        logger.info(f"Incoming Webhook Event: {action}")
 
-        # Ignore non-annotation events safely
+        # Process only active annotation events
         if action not in ["ANNOTATION_CREATED", "ANNOTATION_UPDATED"]:
-            return JSONResponse(status_code=200, content={"status": "ignored", "reason": f"Action '{action}' ignored"})
+            return JSONResponse(status_code=200, content={"status": "ignored", "reason": f"Action {action} skipped"})
 
         task = payload.get("task", {})
         task_data = task.get("data", {}) if isinstance(task, dict) else {}
 
-        # Safely extract annotation result list regardless of structure
+        # Handle Webhook Payload Structure (Single Annotation)
         annotation = payload.get("annotation", {})
         if isinstance(annotation, dict) and "result" in annotation:
-            annotation_results = annotation.get("result", [])
-        elif "annotations" in payload and isinstance(payload["annotations"], list) and len(payload["annotations"]) > 0:
-            annotation_results = payload["annotations"][0].get("result", [])
+            results = annotation.get("result", [])
+        elif "annotations" in payload and isinstance(payload["annotations"], list) and payload["annotations"]:
+            results = payload["annotations"][0].get("result", [])
         else:
-            annotation_results = []
+            results = []
 
-        # Extract Quality Scores (Q5)
-        score_a_quality = extract_score(annotation_results, "a_q5")
-        score_b_quality = extract_score(annotation_results, "b_q5")
+        # Extract metrics
+        score_a_quality = extract_score(results, "a_q5")
+        score_b_quality = extract_score(results, "b_q5")
 
         metrics_a = {
-            "accuracy": extract_score(annotation_results, "a_q1"),
-            "hallucinations": extract_score(annotation_results, "a_q2"),
-            "fluency": extract_score(annotation_results, "a_q3"),
-            "completeness": extract_score(annotation_results, "a_q4"),
+            "accuracy": extract_score(results, "a_q1"),
+            "hallucinations": extract_score(results, "a_q2"),
+            "fluency": extract_score(results, "a_q3"),
+            "completeness": extract_score(results, "a_q4"),
             "quality": score_a_quality,
         }
 
         metrics_b = {
-            "accuracy": extract_score(annotation_results, "b_q1"),
-            "hallucinations": extract_score(annotation_results, "b_q2"),
-            "fluency": extract_score(annotation_results, "b_q3"),
-            "completeness": extract_score(annotation_results, "b_q4"),
+            "accuracy": extract_score(results, "b_q1"),
+            "hallucinations": extract_score(results, "b_q2"),
+            "fluency": extract_score(results, "b_q3"),
+            "completeness": extract_score(results, "b_q4"),
             "quality": score_b_quality,
         }
 
-        human_winner = extract_overall_winner(annotation_results)
-
+        # Check explicit choice -> overall quality score -> tie-breaker
+        human_winner = extract_overall_winner(results)
         summary_a = task_data.get("summary_a_text", "")
         summary_b = task_data.get("summary_b_text", "")
 
@@ -122,6 +116,7 @@ async def handle_phase1_completion(request: Request):
             winner_label = f"Tie (Selected Summary {choice})"
             winning_text = summary_a if choice == "A" else summary_b
 
+        # Payload structure for Phase 2 import API
         phase2_payload = {
             "data": {
                 "packet_id": task_data.get("packet_id", ""),
@@ -137,15 +132,14 @@ async def handle_phase1_completion(request: Request):
         target_url = f"{LABEL_STUDIO_URL.rstrip('/')}/api/projects/{PHASE_2_PROJECT_ID}/tasks"
         res = requests.post(target_url, headers=HEADERS, json=phase2_payload)
 
+        logger.info(f"Phase 2 Task Creation Status: {res.status_code}")
+
         return JSONResponse(status_code=200, content={
             "status": "success",
             "ls_status": res.status_code,
             "winner_label": winner_label
         })
 
-    except Exception as top_err:
-        # Guarantee a 200 OK response with the exact error details inside JSON
-        return JSONResponse(status_code=200, content={
-            "status": "error_caught",
-            "error_message": str(top_err)
-        })
+    except Exception as e:
+        logger.error(f"Webhook processing error: {e}")
+        return JSONResponse(status_code=200, content={"status": "error", "message": str(e)})
