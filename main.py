@@ -1,9 +1,9 @@
 import os
+import random
 import logging
 import requests
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 
-# Enable detailed logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("webhook")
 
@@ -18,83 +18,86 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
+def extract_score(result_list, target_name):
+    """Extracts numerical rating from question responses (e.g., '5 - Excellent' -> 5)."""
+    for res in result_list:
+        if res.get("from_name") == target_name:
+            choices = res.get("value", {}).get("choices", [])
+            if choices and choices[0] and str(choices[0])[0].isdigit():
+                return int(str(choices[0])[0])
+    return 0
+
 @app.get("/")
 def health_check():
-    return {"status": "Webhook service running"}
+    return {"status": "Webhook online"}
 
 @app.post("/webhook/phase1-complete")
 async def handle_phase1_completion(request: Request):
     try:
         payload = await request.json()
-    except Exception as err:
-        logger.error(f"Failed to parse JSON body: {err}")
-        return Response(content='{"status":"bad_request"}', status_code=200, media_type="application/json")
+        action = payload.get("action", "")
 
-    action = payload.get("action", "UNKNOWN")
-    logger.info(f"--- WEBHOOK ACTION RECEIVED: {action} ---")
+        logger.info(f"--- WEBHOOK ACTION: {action} ---")
 
-    # Only process annotation completion/updates
-    if action not in ["ANNOTATION_CREATED", "ANNOTATION_UPDATED"]:
-        logger.info(f"Skipping non-annotation action: {action}")
-        return {"status": "ignored", "reason": f"Action {action} ignored"}
+        if action not in ["ANNOTATION_CREATED", "ANNOTATION_UPDATED"]:
+            return {"status": "ignored", "reason": f"Action {action} ignored"}
 
-    try:
-        task = payload.get("task", {})
-        task_data = task.get("data", {})
-        annotation = payload.get("annotation", {})
-        annotation_results = annotation.get("result", [])
+        task_data = payload.get("task", {}).get("data", {})
+        annotation_results = payload.get("annotation", {}).get("result", [])
 
-        logger.info(f"Task ID: {task.get('id')} | Data Keys: {list(task_data.keys())}")
+        # Extract overall quality scores (Q5)
+        score_a_quality = extract_score(annotation_results, "a_q5")
+        score_b_quality = extract_score(annotation_results, "b_q5")
 
-        # Parse evaluation choice values
-        scores = {}
-        for item in annotation_results:
-            from_name = item.get("from_name")
-            value = item.get("value", {})
-            choices = value.get("choices", [])
-            if choices and from_name:
-                choice_str = str(choices[0]).strip()
-                # Extract starting integer if present (e.g. "1 - Good" -> 1)
-                first_char = choice_str.split("-")[0].strip()
-                scores[from_name] = int(first_char) if first_char.isdigit() else 0
+        # Extract metric breakdowns matching your exact schema
+        metrics_a = {
+            "accuracy": extract_score(annotation_results, "a_q1"),
+            "hallucinations": extract_score(annotation_results, "a_q2"),
+            "fluency": extract_score(annotation_results, "a_q3"),
+            "completeness": extract_score(annotation_results, "a_q4"),
+            "quality": score_a_quality,
+        }
 
-        logger.info(f"Parsed Scores: {scores}")
+        metrics_b = {
+            "accuracy": extract_score(annotation_results, "b_q1"),
+            "hallucinations": extract_score(annotation_results, "b_q2"),
+            "fluency": extract_score(annotation_results, "b_q3"),
+            "completeness": extract_score(annotation_results, "b_q4"),
+            "quality": score_b_quality,
+        }
 
-        # Calculate total penalty scores
-        score_a = scores.get("accuracy_a", 1) + scores.get("hallucination_a", 1)
-        score_b = scores.get("accuracy_b", 1) + scores.get("hallucination_b", 1)
-
-        # Retrieve summary texts
-        summary_a = task_data.get("summary_a_text") or task_data.get("summary_a") or ""
-        summary_b = task_data.get("summary_b_text") or task_data.get("summary_b") or ""
-
-        if score_a <= score_b:
-            chosen_summary = summary_a
-            chosen_label = "A"
+        # Winner selection logic matching your export script
+        if score_a_quality > score_b_quality:
+            winner_label = "Summary A"
+            winning_text = task_data.get("summary_a_text", "")
+        elif score_b_quality > score_a_quality:
+            winner_label = "Summary B"
+            winning_text = task_data.get("summary_b_text", "")
         else:
-            chosen_summary = summary_b
-            chosen_label = "B"
+            choice = random.choice(["A", "B"])
+            winner_label = f"Tie (Selected Summary {choice})"
+            winning_text = task_data.get("summary_a_text", "") if choice == "A" else task_data.get("summary_b_text", "")
 
-        logger.info(f"Winner selected: Summary {chosen_label}")
-
-        # Construct payload for Phase 2
+        # Format output payload for Phase 2 task creation
         phase2_payload = {
             "data": {
-                "packet_id": task_data.get("packet_id"),
-                "title": task_data.get("title"),
-                "intro_text": task_data.get("intro_text"),
-                "chosen_summary_source": chosen_label,
-                "selected_summary": chosen_summary
+                "packet_id": task_data.get("packet_id", ""),
+                "title": task_data.get("title", ""),
+                "intro_text": task_data.get("intro_text", ""),
+                "winning_summary_text": winning_text,
+                "winner_label": winner_label,
+                "summary_a_metrics": metrics_a,
+                "summary_b_metrics": metrics_b,
             }
         }
 
         target_url = f"{LABEL_STUDIO_URL.rstrip('/')}/api/projects/{PHASE_2_PROJECT_ID}/tasks"
-        logger.info(f"Sending payload to Phase 2 API: {target_url}")
+        logger.info(f"Posting task to Phase 2 ({target_url})...")
 
         res = requests.post(target_url, headers=HEADERS, json=phase2_payload)
 
-        logger.info(f"Label Studio API Status: {res.status_code}")
-        logger.info(f"Label Studio API Response: {res.text}")
+        logger.info(f"Phase 2 API Response Status: {res.status_code}")
+        logger.info(f"Phase 2 API Response Text: {res.text}")
 
         return {
             "status": "success",
@@ -102,6 +105,6 @@ async def handle_phase1_completion(request: Request):
             "ls_response": res.text
         }
 
-    except Exception as exc:
-        logger.error(f"Error handling task processing: {exc}", exc_info=True)
-        return {"status": "error", "details": str(exc)}
+    except Exception as e:
+        logger.error(f"Error handling webhook: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
