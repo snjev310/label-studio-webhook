@@ -55,47 +55,76 @@ def extract_text_field(result_list, target_name):
             if text_values:
                 return text_values[0]
     return ""
-def flatten_questions(questions):
+
+
+import json
+import logging
+
+logger = logging.getLogger("webhook")
+
+def flatten_questions(raw_questions):
     """
-    Safely un-strings double-encoded JSON and flattens nested MCQ options 
-    into a pure Python list of dictionaries.
+    Recursively unwraps stringified/double-encoded JSON strings until a native Python list 
+    is recovered, then flattens nested MCQ options into direct keys for Label Studio.
     """
-    if questions is None:
+    if raw_questions is None:
         return []
 
-    # Unwrap stringified JSON (handles single and double stringified cases)
-    while isinstance(questions, str):
+    questions = raw_questions
+
+    # 1. Recursively unwrap if questions is a string (handles single/double JSON encoding)
+    max_depth = 5
+    depth = 0
+    while isinstance(questions, str) and depth < max_depth:
         try:
-            questions = json.loads(questions)
+            parsed = json.loads(questions)
+            questions = parsed
+            depth += 1
         except Exception as e:
-            logger.error(f"Failed to parse questions string into JSON: {e}")
+            logger.error(f"Failed to parse questions string at depth {depth}: {e}")
             return []
 
-    flattened = []
+    # 2. If it's still not a list after unwrapping, return empty
     if not isinstance(questions, list):
-        logger.warning(f"Expected list for questions, got {type(questions)}")
-        return flattened
+        logger.warning(f"Expected list for questions, but got {type(questions)}")
+        return []
 
-    for q in questions:
-        if not isinstance(q, dict):
+    flattened = []
+    for item in questions:
+        # If list element itself is stringified JSON, unwrap it
+        if isinstance(item, str):
+            try:
+                item = json.loads(item)
+            except Exception:
+                continue
+
+        if not isinstance(item, dict):
             continue
-        
-        q_text = q.get("question", "")
-        options = q.get("options", [])
-        
+
+        q_text = item.get("question", "")
+        options = item.get("options", [])
+
+        # Unwrap options if stringified
+        if isinstance(options, str):
+            try:
+                options = json.loads(options)
+            except Exception:
+                options = []
+
         opt_texts = []
-        for opt in options:
-            if isinstance(opt, dict):
-                opt_texts.append(opt.get("text", ""))
-            else:
-                opt_texts.append(str(opt))
-        
-        # Ensure 5 option keys exist
+        if isinstance(options, list):
+            for opt in options:
+                if isinstance(opt, dict):
+                    opt_texts.append(str(opt.get("text", "")))
+                else:
+                    opt_texts.append(str(opt))
+
+        # Ensure exactly 5 options (A through E)
         while len(opt_texts) < 5:
             opt_texts.append("N/A")
 
         flattened.append({
-            "question": q_text,
+            "question": str(q_text),
             "option_a": opt_texts[0],
             "option_b": opt_texts[1],
             "option_c": opt_texts[2],
@@ -181,13 +210,15 @@ async def handle_phase1_completion(request: Request):
             "b_hallucination_lines": extract_text_field(results, "b_hallucination_lines"),
         }
 
-        parsed_questions = flatten_questions(task_data.get("questions", []))
-        # Build payload for Phase 2 creation
+        processed_questions = flatten_questions(task_data.get("questions", []))
+        
+        logger.info(f"Processed {len(processed_questions)} questions for Phase 2 task. Sample: {processed_questions[:1]}")
+
         phase2_data = {
             "packet_id": task_data.get("packet_id", ""),
             "title": task_data.get("title", ""),
             "winning_summary_text": winning_text,
-            "questions": parsed_questions,  # Must be a Python list
+            "questions": processed_questions,  # Pure python list of dicts
             "winner_label": winner_label,
             "phase1_feedback": feedback
         }
