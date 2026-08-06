@@ -42,6 +42,43 @@ def parse_choice_type(result_list, target_name):
                     return "C"
     return None
 
+
+def flatten_questions(questions):
+    """Transforms nested options arrays into flat keys for Label Studio Repeater compatibility."""
+    flattened = []
+    if not isinstance(questions, list):
+        return flattened
+
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        
+        q_text = q.get("question", "")
+        options = q.get("options", [])
+        
+        # Extract option text cleanly whether options is a list of strings or dicts
+        opt_texts = []
+        for opt in options:
+            if isinstance(opt, dict):
+                opt_texts.append(opt.get("text", ""))
+            else:
+                opt_texts.append(str(opt))
+        
+        # Ensure exactly 5 option entries exist
+        while len(opt_texts) < 5:
+            opt_texts.append("N/A")
+
+        flattened.append({
+            "question": q_text,
+            "option_a": opt_texts[0],
+            "option_b": opt_texts[1],
+            "option_c": opt_texts[2],
+            "option_d": opt_texts[3],
+            "option_e": opt_texts[4],
+        })
+
+    return flattened
+
 def extract_text_field(result_list, target_name):
     """Extracts text inputs provided by annotators (e.g. line numbers)."""
     if not isinstance(result_list, list):
@@ -130,7 +167,7 @@ async def handle_phase1_completion(request: Request):
             "packet_id": task_data.get("packet_id", ""),
             "title": task_data.get("title", ""),
             "winning_summary_text": winning_text,
-            "questions": task_data.get("questions", []),
+            "questions": flatten_questions(task_data.get("questions", [])),
             "winner_label": winner_label,
             "phase1_feedback": feedback
         }
