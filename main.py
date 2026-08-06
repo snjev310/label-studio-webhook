@@ -1,4 +1,5 @@
 import os
+import json
 import random
 import logging
 import traceback
@@ -58,21 +59,27 @@ def extract_text_field(result_list, target_name):
 
 def flatten_questions(questions):
     """
-    Flattens nested MCQ options into direct keys (option_a, option_b, etc.)
-    so Label Studio Repeater can render them cleanly.
+    Ensures questions is a parsed Python list and flattens nested MCQ options 
+    into direct keys (option_a, option_b, etc.) for Label Studio Repeater.
     """
+    if isinstance(questions, str):
+        try:
+            questions = json.loads(questions)
+        except Exception as e:
+            logger.error(f"Failed to parse questions JSON string: {e}")
+            return []
+
     flattened = []
     if not isinstance(questions, list):
         return flattened
 
-    for q in questions:
+    for idx, q in enumerate(questions):
         if not isinstance(q, dict):
             continue
         
         q_text = q.get("question", "")
         options = q.get("options", [])
         
-        # Extract option text cleanly whether options is a list of strings or dicts
         opt_texts = []
         for opt in options:
             if isinstance(opt, dict):
@@ -80,7 +87,7 @@ def flatten_questions(questions):
             else:
                 opt_texts.append(str(opt))
         
-        # Ensure exactly 5 option entries exist
+        # Ensure 5 option entries exist
         while len(opt_texts) < 5:
             opt_texts.append("N/A")
 
