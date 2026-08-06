@@ -55,21 +55,25 @@ def extract_text_field(result_list, target_name):
             if text_values:
                 return text_values[0]
     return ""
-
 def flatten_questions(questions):
+    """
+    Safely un-strings double-encoded JSON and flattens nested MCQ options 
+    into a pure Python list of dictionaries.
+    """
     if questions is None:
         return []
 
-    # If questions was passed as a stringified JSON from Phase 1, parse it into a list
-    if isinstance(questions, str):
+    # Unwrap stringified JSON (handles single and double stringified cases)
+    while isinstance(questions, str):
         try:
             questions = json.loads(questions)
         except Exception as e:
-            logger.error(f"Failed to parse questions JSON string: {e}")
+            logger.error(f"Failed to parse questions string into JSON: {e}")
             return []
 
     flattened = []
     if not isinstance(questions, list):
+        logger.warning(f"Expected list for questions, got {type(questions)}")
         return flattened
 
     for q in questions:
@@ -86,6 +90,7 @@ def flatten_questions(questions):
             else:
                 opt_texts.append(str(opt))
         
+        # Ensure 5 option keys exist
         while len(opt_texts) < 5:
             opt_texts.append("N/A")
 
@@ -98,7 +103,6 @@ def flatten_questions(questions):
             "option_e": opt_texts[4],
         })
 
-    # MUST return a Python list
     return flattened
 
 
@@ -177,12 +181,13 @@ async def handle_phase1_completion(request: Request):
             "b_hallucination_lines": extract_text_field(results, "b_hallucination_lines"),
         }
 
+        parsed_questions = flatten_questions(task_data.get("questions", []))
         # Build payload for Phase 2 creation
         phase2_data = {
             "packet_id": task_data.get("packet_id", ""),
             "title": task_data.get("title", ""),
             "winning_summary_text": winning_text,
-            "questions": flatten_questions(task_data.get("questions", [])),
+            "questions": parsed_questions,  # Must be a Python list
             "winner_label": winner_label,
             "phase1_feedback": feedback
         }
