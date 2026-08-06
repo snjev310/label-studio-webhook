@@ -62,6 +62,9 @@ def flatten_questions(questions):
     Ensures questions is a native Python list (parsing JSON strings if needed)
     and flattens nested MCQ options into direct keys for Label Studio Repeater.
     """
+    if questions is None:
+        return []
+
     # 1. CRITICAL FIX: If questions is received as a JSON string, parse it into a list
     if isinstance(questions, str):
         try:
@@ -130,14 +133,15 @@ async def handle_phase1_completion(request: Request):
         task = payload.get("task", {})
         task_data = task.get("data", {}) if isinstance(task, dict) else {}
 
-        # Safely extract annotation result list
-        annotation = payload.get("annotation", {})
-        if isinstance(annotation, dict) and "result" in annotation:
-            results = annotation.get("result", [])
+        # ROBUST RESULT EXTRACTION:
+        # Handles all Label Studio webhook versions (root level, payload.annotation, or payload.annotations[0])
+        results = []
+        if "result" in payload and isinstance(payload["result"], list):
+            results = payload["result"]
+        elif "annotation" in payload and isinstance(payload["annotation"], dict) and "result" in payload["annotation"]:
+            results = payload["annotation"]["result"]
         elif "annotations" in payload and isinstance(payload["annotations"], list) and payload["annotations"]:
             results = payload["annotations"][0].get("result", [])
-        else:
-            results = []
 
         # Parse Simplicity choices for Summary A and Summary B
         choice_a = parse_choice_type(results, "a_simplicity")
