@@ -22,6 +22,7 @@ ls_client = LabelStudio(
     api_key=API_KEY
 )
 
+
 def parse_choice_type(result_list, target_name):
     """
     Extracts choice classification ('A', 'B', or 'C') for a given target control name
@@ -43,8 +44,23 @@ def parse_choice_type(result_list, target_name):
     return None
 
 
+def extract_text_field(result_list, target_name):
+    """Extracts text inputs provided by annotators (e.g., line numbers)."""
+    if not isinstance(result_list, list):
+        return ""
+    for res in result_list:
+        if isinstance(res, dict) and res.get("from_name") == target_name:
+            text_values = res.get("value", {}).get("text", [])
+            if text_values:
+                return text_values[0]
+    return ""
+
+
 def flatten_questions(questions):
-    """Transforms nested options arrays into flat keys for Label Studio Repeater compatibility."""
+    """
+    Flattens nested MCQ options into direct keys (option_a, option_b, etc.)
+    so Label Studio Repeater can render them cleanly.
+    """
     flattened = []
     if not isinstance(questions, list):
         return flattened
@@ -79,24 +95,16 @@ def flatten_questions(questions):
 
     return flattened
 
-def extract_text_field(result_list, target_name):
-    """Extracts text inputs provided by annotators (e.g. line numbers)."""
-    if not isinstance(result_list, list):
-        return ""
-    for res in result_list:
-        if isinstance(res, dict) and res.get("from_name") == target_name:
-            text_values = res.get("value", {}).get("text", [])
-            if text_values:
-                return text_values[0]
-    return ""
 
 @app.get("/")
 def health_check():
     return {"status": "Webhook online"}
 
+
 @app.get("/webhook/phase1-complete")
 def webhook_get_check():
     return {"status": "Webhook endpoint is active (POST required)"}
+
 
 @app.post("/webhook/phase1-complete")
 async def handle_phase1_completion(request: Request):
@@ -150,7 +158,7 @@ async def handle_phase1_completion(request: Request):
             logger.info("No clear winner (Option B) selected in Phase 1. Skipping Phase 2 task creation.")
             return JSONResponse(status_code=200, content={"status": "skipped", "reason": "No clear winner chosen"})
 
-        # Collect feedback line numbers for analytics/debugging
+        # Collect feedback line numbers for auditability
         feedback = {
             "a_simplicity": choice_a,
             "b_simplicity": choice_b,
