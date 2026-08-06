@@ -57,82 +57,75 @@ def extract_text_field(result_list, target_name):
     return ""
 
 
-import json
-import logging
-
-logger = logging.getLogger("webhook")
-
-def flatten_questions(raw_questions):
+def build_flattened_question_dict(raw_questions):
     """
-    Recursively unwraps stringified/double-encoded JSON strings until a native Python list 
-    is recovered, then flattens nested MCQ options into direct keys for Label Studio.
+    Flattens up to 5 MCQs into discrete top-level string keys 
+    (q1_text, q1_opt_a, q1_opt_b, ..., q5_opt_e) so Label Studio 
+    stores them natively as strings without SDK list-serialization bugs.
     """
     if raw_questions is None:
-        return []
+        raw_questions = []
 
     questions = raw_questions
-
-    # 1. Recursively unwrap if questions is a string (handles single/double JSON encoding)
-    max_depth = 5
-    depth = 0
-    while isinstance(questions, str) and depth < max_depth:
+    while isinstance(questions, str):
         try:
-            parsed = json.loads(questions)
-            questions = parsed
-            depth += 1
-        except Exception as e:
-            logger.error(f"Failed to parse questions string at depth {depth}: {e}")
-            return []
+            questions = json.loads(questions)
+        except Exception:
+            questions = []
+            break
 
-    # 2. If it's still not a list after unwrapping, return empty
     if not isinstance(questions, list):
-        logger.warning(f"Expected list for questions, but got {type(questions)}")
-        return []
+        questions = []
 
-    flattened = []
-    for item in questions:
-        # If list element itself is stringified JSON, unwrap it
-        if isinstance(item, str):
-            try:
-                item = json.loads(item)
-            except Exception:
-                continue
+    q_dict = {}
 
-        if not isinstance(item, dict):
-            continue
+    for i in range(1, 6):  # Support up to 5 questions
+        if i - 1 < len(questions):
+            q = questions[i - 1]
+            if isinstance(q, str):
+                try:
+                    q = json.loads(q)
+                except Exception:
+                    q = {}
+            if not isinstance(q, dict):
+                q = {}
 
-        q_text = item.get("question", "")
-        options = item.get("options", [])
+            q_text = q.get("question", "")
+            options = q.get("options", [])
+            if isinstance(options, str):
+                try:
+                    options = json.loads(options)
+                except Exception:
+                    options = []
 
-        # Unwrap options if stringified
-        if isinstance(options, str):
-            try:
-                options = json.loads(options)
-            except Exception:
-                options = []
+            opt_texts = []
+            if isinstance(options, list):
+                for opt in options:
+                    if isinstance(opt, dict):
+                        opt_texts.append(str(opt.get("text", "")))
+                    else:
+                        opt_texts.append(str(opt))
 
-        opt_texts = []
-        if isinstance(options, list):
-            for opt in options:
-                if isinstance(opt, dict):
-                    opt_texts.append(str(opt.get("text", "")))
-                else:
-                    opt_texts.append(str(opt))
+            while len(opt_texts) < 5:
+                opt_texts.append("N/A")
 
-        # Ensure exactly 5 options (A through E)
-        while len(opt_texts) < 5:
-            opt_texts.append("N/A")
+            q_dict[f"q{i}_text"] = str(q_text)
+            q_dict[f"q{i}_opt_a"] = opt_texts[0]
+            q_dict[f"q{i}_opt_b"] = opt_texts[1]
+            q_dict[f"q{i}_opt_c"] = opt_texts[2]
+            q_dict[f"q{i}_opt_d"] = opt_texts[3]
+            q_dict[f"q{i}_opt_e"] = opt_texts[4]
+            q_dict[f"q{i}_visible"] = True
+        else:
+            q_dict[f"q{i}_text"] = ""
+            q_dict[f"q{i}_opt_a"] = ""
+            q_dict[f"q{i}_opt_b"] = ""
+            q_dict[f"q{i}_opt_c"] = ""
+            q_dict[f"q{i}_opt_d"] = ""
+            q_dict[f"q{i}_opt_e"] = ""
+            q_dict[f"q{i}_visible"] = False
 
-        flattened.append({
-            "question": str(q_text),
-            "option_a": opt_texts[0],
-            "option_b": opt_texts[1],
-            "option_c": opt_texts[2],
-            "option_d": opt_texts[3],
-            "option_e": opt_texts[4],
-        })
-
-    return flattened
+    return q_dict
 
 
 @app.get("/")
@@ -210,17 +203,15 @@ async def handle_phase1_completion(request: Request):
             "b_hallucination_lines": extract_text_field(results, "b_hallucination_lines"),
         }
 
-        processed_questions = flatten_questions(task_data.get("questions", []))
-        
-        logger.info(f"Processed {len(processed_questions)} questions for Phase 2 task. Sample: {processed_questions[:1]}")
+        q_fields = build_flattened_question_dict(task_data.get("questions", []))
 
         phase2_data = {
             "packet_id": task_data.get("packet_id", ""),
             "title": task_data.get("title", ""),
             "winning_summary_text": winning_text,
-            "questions": processed_questions,  # Pure python list of dicts
             "winner_label": winner_label,
-            "phase1_feedback": feedback
+            "phase1_feedback": feedback,
+            **q_fields  # Merges q1_text, q1_opt_a, q2_text, etc. into top-level keys
         }
 
         # Create task in Phase 2 using the official Label Studio SDK
