@@ -22,33 +22,36 @@ ls_client = LabelStudio(
     api_key=API_KEY
 )
 
-def extract_score(result_list, target_name):
-    """Safely extracts numerical ratings matching choice strings (e.g. '5 - Excellent' -> 5)."""
+def parse_choice_type(result_list, target_name):
+    """
+    Extracts choice classification ('A', 'B', or 'C') for a given target control name
+    (e.g., 'a_simplicity' or 'b_simplicity').
+    """
     if not isinstance(result_list, list):
-        return 0
+        return None
     for res in result_list:
         if isinstance(res, dict) and res.get("from_name") == target_name:
             choices = res.get("value", {}).get("choices", [])
             if choices and choices[0]:
-                val_str = str(choices[0]).strip()
-                if val_str and val_str[0].isdigit():
-                    return int(val_str[0])
-    return 0
-
-def extract_overall_winner(result_list):
-    """Extracts explicit human selection from 'overall_winner' if recorded."""
-    if not isinstance(result_list, list):
-        return None
-    for res in result_list:
-        if isinstance(res, dict) and res.get("from_name") == "overall_winner":
-            choices = res.get("value", {}).get("choices", [])
-            if choices and choices[0]:
-                val_str = str(choices[0])
-                if "Summary A" in val_str:
-                    return "Summary A"
-                elif "Summary B" in val_str:
-                    return "Summary B"
+                choice_str = str(choices[0]).strip().lower()
+                if choice_str.startswith("a lot"):
+                    return "A"
+                elif choice_str.startswith("little"):
+                    return "B"
+                elif choice_str.startswith("some"):
+                    return "C"
     return None
+
+def extract_text_field(result_list, target_name):
+    """Extracts text inputs provided by annotators (e.g. line numbers)."""
+    if not isinstance(result_list, list):
+        return ""
+    for res in result_list:
+        if isinstance(res, dict) and res.get("from_name") == target_name:
+            text_values = res.get("value", {}).get("text", [])
+            if text_values:
+                return text_values[0]
+    return ""
 
 @app.get("/")
 def health_check():
@@ -66,7 +69,7 @@ async def handle_phase1_completion(request: Request):
         logger.info(f"Incoming Webhook Event: {action}")
 
         # Process only active annotation events
-        if action not in ["ANNOTATION_CREATED", "ANNOTATION_UPDATED"]:
+        if action not in ["ANNOTATION_CREATED", "ANNOTATION_UPDATED", "annotation_created", "annotation_updated"]:
             return JSONResponse(status_code=200, content={"status": "ignored", "reason": f"Action {action} skipped"})
 
         task = payload.get("task", {})
@@ -81,59 +84,58 @@ async def handle_phase1_completion(request: Request):
         else:
             results = []
 
-        # Extract quality scores
-        score_a_quality = extract_score(results, "a_q5")
-        score_b_quality = extract_score(results, "b_q5")
+        # Parse Simplicity choices for Summary A and Summary B
+        choice_a = parse_choice_type(results, "a_simplicity")
+        choice_b = parse_choice_type(results, "b_simplicity")
 
-        metrics_a = {
-            "accuracy": extract_score(results, "a_q1"),
-            "hallucinations": extract_score(results, "a_q2"),
-            "fluency": extract_score(results, "a_q3"),
-            "completeness": extract_score(results, "a_q4"),
-            "quality": score_a_quality,
-        }
+        logger.info(f"Task {task.get('id')}: Summary A Choice = '{choice_a}', Summary B Choice = '{choice_b}'")
 
-        metrics_b = {
-            "accuracy": extract_score(results, "b_q1"),
-            "hallucinations": extract_score(results, "b_q2"),
-            "fluency": extract_score(results, "b_q3"),
-            "completeness": extract_score(results, "b_q4"),
-            "quality": score_b_quality,
-        }
-
-        # Check explicit choice -> overall quality score -> tie-breaker
-        human_winner = extract_overall_winner(results)
         summary_a = task_data.get("summary_a_text", "")
         summary_b = task_data.get("summary_b_text", "")
 
-        if human_winner == "Summary A":
-            winner_label = "Summary A"
-            winning_text = summary_a
-        elif human_winner == "Summary B":
-            winner_label = "Summary B"
-            winning_text = summary_b
-        elif score_a_quality > score_b_quality:
-            winner_label = "Summary A"
-            winning_text = summary_a
-        elif score_b_quality > score_a_quality:
-            winner_label = "Summary B"
-            winning_text = summary_b
-        else:
-            choice = random.choice(["A", "B"])
-            winner_label = f"Tie (Selected Summary {choice})"
-            winning_text = summary_a if choice == "A" else summary_b
+        winning_text = None
+        winner_label = None
 
+        # Logic: Option B ("Little to no jargon...") designates a clear winner
+        if choice_a == "B" and choice_b != "B":
+            winning_text = summary_a
+            winner_label = "Summary A"
+        elif choice_b == "B" and choice_a != "B":
+            winning_text = summary_b
+            winner_label = "Summary B"
+        elif choice_a == "B" and choice_b == "B":
+            # Tie-breaker: default to Summary A if both are rated B
+            winning_text = summary_a
+            winner_label = "Summary A (Tie-breaker)"
+
+        # If no summary was marked B, skip forwarding
+        if not winning_text:
+            logger.info("No clear winner (Option B) selected in Phase 1. Skipping Phase 2 task creation.")
+            return JSONResponse(status_code=200, content={"status": "skipped", "reason": "No clear winner chosen"})
+
+        # Collect feedback line numbers for analytics/debugging
+        feedback = {
+            "a_simplicity": choice_a,
+            "b_simplicity": choice_b,
+            "a_jargon_lines": extract_text_field(results, "a_jargon_lines"),
+            "a_incomprehensible_lines": extract_text_field(results, "a_incomprehensible_lines"),
+            "a_hallucination_lines": extract_text_field(results, "a_hallucination_lines"),
+            "b_jargon_lines": extract_text_field(results, "b_jargon_lines"),
+            "b_incomprehensible_lines": extract_text_field(results, "b_incomprehensible_lines"),
+            "b_hallucination_lines": extract_text_field(results, "b_hallucination_lines"),
+        }
+
+        # Build payload for Phase 2 creation
         phase2_data = {
             "packet_id": task_data.get("packet_id", ""),
             "title": task_data.get("title", ""),
-            "intro_text": task_data.get("intro_text", ""),
             "winning_summary_text": winning_text,
+            "questions": task_data.get("questions", []),
             "winner_label": winner_label,
-            "summary_a_metrics": metrics_a,
-            "summary_b_metrics": metrics_b,
+            "phase1_feedback": feedback
         }
 
-        # Create task in Phase 2 using official SDK method
+        # Create task in Phase 2 using the official Label Studio SDK
         created_task = ls_client.tasks.create(
             project=PHASE_2_PROJECT_ID,
             data=phase2_data
